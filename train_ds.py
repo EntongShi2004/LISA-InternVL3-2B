@@ -14,12 +14,12 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.tensorboard import SummaryWriter
 
 from model.LISA import LISAForCausalLM
-from model.llava import conversation as conversation_lib
+from model.internvl import conversation as conversation_lib
 from utils.dataset import HybridDataset, ValDataset, collate_fn
 from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
                          AverageMeter, ProgressMeter, Summary, dict_to_cuda,
                          intersectionAndUnionGPU)
-
+from transformers import AutoTokenizer
 
 def parse_args(args):
     parser = argparse.ArgumentParser(description="LISA Model Training")
@@ -99,9 +99,9 @@ def parse_args(args):
     parser.add_argument("--auto_resume", action="store_true", default=True)
     parser.add_argument(
         "--conv_type",
-        default="llava_v1",
+        default="internvl_zh",
         type=str,
-        choices=["llava_v1", "llava_llama_2"],
+        choices=["internvl_zh"],
     )
     return parser.parse_args(args)
 
@@ -114,16 +114,33 @@ def main(args):
         writer = SummaryWriter(args.log_dir)
     else:
         writer = None
-
+    # 从这里开始
+    # 这个是赋值的语句：
+    # tokenizer = transformers.AutoTokenizer.from_pretrained(
+    #         args.version,
+    #         cache_dir=None,
+    #         model_max_length=args.model_max_length,
+    #         padding_side="right",
+    #         use_fast=False,
+    #     )
+    #
+    # 这个加载的是Qwen2Tokenizer，我该怎样加载InternLM2Tokenizer呢？
     # Create model
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        args.version,
-        cache_dir=None,
+    # tokenizer = InternLM2Tokenizer(
+    #     vocab_file="/home/entong/InternVL3-2B-2/LISA-main/pretrained_models/InternVL3-2B/vocab.json",  # 替换为实际的vocab文件路径
+    #     model_max_length=args.model_max_length,  # 可选，根据需求设置
+    #     padding_side="right",  # 可选，根据需求设置
+    #     add_bos_token=True,  # 可选，默认True，根据需求调整
+    #     add_eos_token=False,  # 可选，默认False，根据需求调整
+    # )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        "pretrained_models/InternVL3-2B",
         model_max_length=args.model_max_length,
         padding_side="right",
-        use_fast=False,
+        use_fast=False
     )
-    tokenizer.pad_token = tokenizer.unk_token
+    # tokenizer.pad_token = tokenizer.unk_token
     num_added_tokens = tokenizer.add_tokens("[SEG]")
     args.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
 
@@ -131,6 +148,11 @@ def main(args):
         tokenizer.add_tokens(
             [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
         )
+
+
+    print("==========================")
+    print(tokenizer)
+    print("=========================")
 
     model_args = {
         "train_mask_decoder": args.train_mask_decoder,
@@ -151,6 +173,22 @@ def main(args):
     model = LISAForCausalLM.from_pretrained(
         args.version, torch_dtype=torch_dtype, low_cpu_mem_usage=True, **model_args
     )
+
+    # 新增打印代码
+    # print("LISAForCausalLM instance attributes:")
+    # for attr_name in dir(model):
+    #     if not attr_name.startswith('__') and not callable(getattr(model, attr_name)):
+    #         print(f"  - {attr_name}")
+    #
+    # print("\nLISAForCausalLM submodules:")
+    # for name, module in model.named_modules():
+    #     print(f"  {name}: {type(module).__name__}")
+    #
+    # print("\nLISAForCausalLM __dict__ keys:")
+    # for key in model.__dict__.keys():
+    #     print(f"  - {key}")
+    # exit(0)
+
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
@@ -158,16 +196,18 @@ def main(args):
     model.enable_input_require_grads()
     model.gradient_checkpointing_enable()
 
-    model.get_model().initialize_vision_modules(model.get_model().config)
-    vision_tower = model.get_model().get_vision_tower()
+    vision_tower = model.vision_model
     vision_tower.to(dtype=torch_dtype, device=args.local_rank)
-    if not args.eval_only:
-        model.get_model().initialize_lisa_modules(model.get_model().config)
+    # if not args.eval_only:
+    #     model.initialize_lisa_modules(model.config)
 
     for p in vision_tower.parameters():
         p.requires_grad = False
-    for p in model.get_model().mm_projector.parameters():
-        p.requires_grad = False
+    if hasattr(model, "mlp1"):
+        for p in model.mlp1.parameters():
+            p.requires_grad = False
+    # for p in model.mm_projector.parameters():
+    #     p.requires_grad = False
 
     conversation_lib.default_conversation = conversation_lib.conv_templates[
         args.conv_type
@@ -187,8 +227,7 @@ def main(args):
                             x not in name
                             for x in [
                                 "visual_model",
-                                "vision_tower",
-                                "mm_projector",
+                                "mlp1",
                                 "text_hidden_fcs",
                             ]
                         ]
@@ -203,6 +242,16 @@ def main(args):
         lora_target_modules = find_linear_layers(
             model, args.lora_target_modules.split(",")
         )
+
+        print("Found LORA target modules:", lora_target_modules)
+        if not lora_target_modules:
+            print("Warning: No target modules found!")
+            # 可选：打印模型中所有线性层名称，便于排查
+            print("All linear layers in model:")
+            for name, module in model.named_modules():
+                if isinstance(module, torch.nn.Linear):
+                    print(f"  {name}")
+
         lora_config = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
@@ -221,7 +270,7 @@ def main(args):
         if any(
             [
                 x in n
-                for x in ["lm_head", "embed_tokens", "mask_decoder", "text_hidden_fcs"]
+                for x in ["lm_head", "embed_tokens", "mask_decoder", "text_hidden_fcs", "m1p1"]
             ]
         ):
             print("n: ", n, "p.shape: ", p.shape)
@@ -366,6 +415,7 @@ def main(args):
 
     for epoch in range(args.start_epoch, args.epochs):
         # train for one epoch
+        # 在这里崩溃
         train_iter = train(
             train_loader,
             model_engine,

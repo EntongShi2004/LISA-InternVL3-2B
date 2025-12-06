@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .llava.model.language_model.llava_llama import (LlavaLlamaForCausalLM,
-                                                     LlavaLlamaModel)
+from .internvl.model.internvl_chat.modeling_internvl_chat import InternVLChatModel, InternVLChatConfig
+
 from .segment_anything import build_sam_vit_h
 
 
@@ -75,7 +75,6 @@ class LisaMetaModel:
     def initialize_lisa_modules(self, config):
         # SAM
         self.visual_model = build_sam_vit_h(self.vision_pretrained)
-        # self.visual_model = build_sam_vit_b(self.vision_pretrained)
         for param in self.visual_model.parameters():
             param.requires_grad = False
         if config.train_mask_decoder:
@@ -84,7 +83,7 @@ class LisaMetaModel:
                 param.requires_grad = True
 
         # Projection layer
-        in_dim = config.hidden_size
+        in_dim = config.llm_config.hidden_size
         out_dim = config.out_dim
         text_fc = [
             nn.Linear(in_dim, in_dim),
@@ -98,7 +97,7 @@ class LisaMetaModel:
             param.requires_grad = True
 
 
-class LisaModel(LisaMetaModel, LlavaLlamaModel):
+class LisaModel(LisaMetaModel, InternVLChatModel):
     def __init__(
             self,
             config,
@@ -107,17 +106,11 @@ class LisaModel(LisaMetaModel, LlavaLlamaModel):
         super(LisaModel, self).__init__(config, **kwargs)
 
         self.config.use_cache = False
-        self.config.vision_tower = self.config.mm_vision_tower
-        self.config.mm_vision_select_feature = "patch"
-        self.config.image_aspect_ratio = "square"
-        self.config.image_grid_pinpoints = None
         self.config.tune_mm_mlp_adapter = False
         self.config.freeze_mm_mlp_adapter = True
-        self.config.pretrain_mm_mlp_adapter = None
-        self.config.mm_use_im_patch_token = False
 
 
-class LISAForCausalLM(LlavaLlamaForCausalLM):
+class LISAForCausalLM(InternVLChatModel):
     def __init__(
             self,
             config,
@@ -125,37 +118,51 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
     ):
         if not hasattr(config, "train_mask_decoder"):
             config.mm_use_im_start_end = kwargs.pop("use_mm_start_end", True)
-            config.mm_vision_tower = kwargs.get(
-                "vision_tower", "openai/clip-vit-large-patch14"
-            )
             self.ce_loss_weight = kwargs.pop("ce_loss_weight", None)
             self.dice_loss_weight = kwargs.pop("dice_loss_weight", None)
             self.bce_loss_weight = kwargs.pop("bce_loss_weight", None)
-        else:
-            config.mm_vision_tower = config.vision_tower
 
         self.seg_token_idx = kwargs.pop("seg_token_idx")
 
+        # 初始化InternVLChatModel
         super().__init__(config)
 
-        self.model = LisaModel(config, **kwargs)
+        self.lm_head = nn.Linear(config.llm_config.hidden_size, config.llm_config.vocab_size, bias=False)
 
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-        # Initialize weights and apply final processing
+        # 初始化权重
         self.post_init()
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings  # 与 __init__ 中定义的 self.lm_head 对应
+        self.lm_head.weight = nn.Parameter(new_embeddings.weight.clone())
+
+    def get_output_embeddings(self):
+        return self.lm_head
 
     def get_visual_embs(self, pixel_values: torch.FloatTensor):
         with torch.no_grad():
-            image_embeddings_list = []
-            for i in range(pixel_values.shape[0]):
-                torch.cuda.empty_cache()
-                image_embeddings = self.model.visual_model.image_encoder(
-                    pixel_values[i].unsqueeze(0)
-                )
-                image_embeddings_list.append(image_embeddings)
-            torch.cuda.empty_cache()
-            image_embeddings = torch.cat(image_embeddings_list, 0)
+            x = self.vision_model.embeddings(pixel_values)
+            encoder_outputs = self.vision_model.encoder(x)
+            # 打印 encoder_outputs 的类型和属性
+            print("encoder_outputs type:", type(encoder_outputs))
+            print("encoder_outputs attributes:", dir(encoder_outputs))
+            # 若为元组/列表，打印长度和元素类型
+            if isinstance(encoder_outputs, (tuple, list)):
+                print("encoder_outputs length:", len(encoder_outputs))
+                for i, elem in enumerate(encoder_outputs):
+                    print(f"  elem {i} type:", type(elem))
+                    if hasattr(elem, 'shape'):
+                        print(f"  elem {i} shape:", elem.shape)
+            # 尝试提取张量（备选方案）
+            if hasattr(encoder_outputs, 'last_hidden_state'):
+                image_embeddings = encoder_outputs.last_hidden_state
+            elif isinstance(encoder_outputs, (tuple, list)) and len(encoder_outputs) > 0:
+                image_embeddings = encoder_outputs[0]  # 取第一个元素作为张量
+            else:
+                image_embeddings = encoder_outputs  # 最后尝试直接赋值
+            print("image_embeddings type:", type(image_embeddings))
+            if hasattr(image_embeddings, 'shape'):
+                print("image_embeddings shape:", image_embeddings.shape)
         return image_embeddings
 
     def forward(self, **kwargs):
@@ -189,11 +196,31 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             ],
             dim=1,
         )
-        # hack for IMAGE_TOKEN_INDEX (we suppose that there is only one image, and it is in the front)
         seg_token_mask = torch.cat(
             [torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(), seg_token_mask],
             dim=1,
         )
+
+        print(f"Debug: batch_size = {batch_size}")
+        print(f"Debug: images_clip shape = {images_clip.shape}")
+        print(f"Debug: input_ids shape = {input_ids.shape}")
+
+        # 检查img_context_token_id
+        if hasattr(self, 'img_context_token_id'):
+            print(f"Debug: img_context_token_id = {self.img_context_token_id}")
+            # 检查input_ids中是否有这个token
+            has_token = (input_ids == self.img_context_token_id).any()
+            print(f"Debug: input_ids contains img_context_token_id: {has_token}")
+            if has_token:
+                token_count = (input_ids == self.img_context_token_id).sum()
+                print(f"Debug: Number of img_context_token_id in input_ids: {token_count}")
+        else:
+            print(f"Debug: No img_context_token_id attribute found")
+            # 尝试从tokenizer中找到图像token
+            if hasattr(self, 'tokenizer'):
+                image_token_id = self.tokenizer.convert_tokens_to_ids('<image>')
+                print(f"Debug: <image> token id from tokenizer: {image_token_id}")
+                self.img_context_token_id = image_token_id
 
         if inference:
             n_batch = 1
@@ -204,11 +231,20 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             output_hidden_states = []
             for i in range(n_batch):
                 start_i, end_i = i * length, min((i + 1) * length, input_ids.shape[0])
+                batch_size_i = end_i - start_i
+
+                # 视觉token数量
+                num_image_tokens = 64
+                image_flags = torch.ones((batch_size_i, num_image_tokens), device=images_clip_extend.device)
+
+                print(f"Debug inference: image_flags shape = {image_flags.shape}")
+
                 output_i = super().forward(
-                    images=images_clip_extend[: end_i - start_i],
+                    pixel_values=images_clip_extend[: end_i - start_i],
                     attention_mask=attention_masks[start_i:end_i],
                     input_ids=input_ids[start_i:end_i],
                     output_hidden_states=True,
+                    image_flags=image_flags,
                 )
                 output_hidden_states.append(output_i.hidden_states)
                 torch.cuda.empty_cache()
@@ -221,40 +257,70 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
 
         else:
             images_clip_list = []
-            # 将 offset Tensor 转换为 Python 整数列表（确保无小数）
             offset = offset.cpu().numpy().astype(int).tolist()
             for i in range(len(offset) - 1):
                 start_i, end_i = offset[i], offset[i + 1]
-                # 强制转换为整数，避免 float 类型
                 expand_size = int(end_i - start_i)
-                # 确保 expand_size 是正整数（防止异常）
                 expand_size = max(expand_size, 1)
                 images_clip_i = (
                     images_clip[i]
                     .unsqueeze(0)
-                    .expand(expand_size, -1, -1, -1)  # 现在是整数
+                    .expand(expand_size, -1, -1, -1)
                     .contiguous()
                 )
                 images_clip_list.append(images_clip_i)
             images_clip = torch.cat(images_clip_list, dim=0)
 
+            # 训练模式
+            batch_size_train = images_clip.shape[0]
+
+            # 视觉token数量
+            num_image_tokens = 64
+            image_flags = torch.ones((batch_size_train, num_image_tokens), device=images_clip.device)
+
+            print(f"Debug training: image_flags shape = {image_flags.shape}")
+            print(f"Debug training: batch_size_train = {batch_size_train}")
+
+            # 确保img_context_token_id存在
+            if not hasattr(self, 'img_context_token_id'):
+                # 尝试找到图像token
+                # 通常InternVL使用<image>作为图像占位符
+                image_token_candidates = ['<image>', '<IMG>', '<img>', '[IMAGE]']
+                found = False
+                for token in image_token_candidates:
+                    try:
+                        token_id = self.tokenizer.convert_tokens_to_ids(token)
+                        if token_id != self.tokenizer.unk_token_id:
+                            self.img_context_token_id = token_id
+                            print(f"Debug: Found image token '{token}' with id {token_id}")
+                            found = True
+                            break
+                    except:
+                        continue
+
+                if not found:
+                    # 如果找不到，使用一个默认值
+                    self.img_context_token_id = 64000  # 常见的图像token id
+                    print(f"Debug: Using default img_context_token_id = {self.img_context_token_id}")
+
             output = super().forward(
-                images=images_clip,
+                pixel_values=images_clip,
                 attention_mask=attention_masks,
                 input_ids=input_ids,
                 labels=labels,
                 output_hidden_states=True,
+                image_flags=image_flags,
             )
             output_hidden_states = output.hidden_states
 
         hidden_states = []
 
-        assert len(self.model.text_hidden_fcs) == 1
-        hidden_states.append(self.model.text_hidden_fcs[0](output_hidden_states[-1]))
+        assert len(self.text_hidden_fcs) == 1
+        hidden_states.append(self.text_hidden_fcs[0](output_hidden_states[-1]))
 
         last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
         pred_embeddings = last_hidden_state[seg_token_mask]
-        seg_token_counts = seg_token_mask.int().sum(-1)  # [bs, ]
+        seg_token_counts = seg_token_mask.int().sum(-1)
 
         seg_token_offset = seg_token_counts.cumsum(-1)
         seg_token_offset = torch.cat(
@@ -275,21 +341,21 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             (
                 sparse_embeddings,
                 dense_embeddings,
-            ) = self.model.visual_model.prompt_encoder(
+            ) = self.visual_model.prompt_encoder(
                 points=None,
                 boxes=None,
                 masks=None,
                 text_embeds=pred_embeddings[i].unsqueeze(1),
             )
             sparse_embeddings = sparse_embeddings.to(pred_embeddings[i].dtype)
-            low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
+            low_res_masks, iou_predictions = self.visual_model.mask_decoder(
                 image_embeddings=image_embeddings[i].unsqueeze(0),
-                image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
+                image_pe=self.visual_model.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embeddings,
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=multimask_output,
             )
-            pred_mask = self.model.visual_model.postprocess_masks(
+            pred_mask = self.visual_model.postprocess_masks(
                 low_res_masks,
                 input_size=resize_list[i],
                 original_size=label_list[i].shape,
@@ -357,7 +423,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
     ):
         with torch.no_grad():
             outputs = self.generate(
-                images=images_clip,
+                pixel_values=images_clip,
                 input_ids=input_ids,
                 max_new_tokens=max_new_tokens,
                 num_beams=1,
@@ -368,7 +434,6 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             output_ids = outputs.sequences
 
             seg_token_mask = output_ids[:, 1:] == self.seg_token_idx
-            # hack for IMAGE_TOKEN_INDEX (we suppose that there is only one image, and it is in the front)
             seg_token_mask = torch.cat(
                 [
                     torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(),
@@ -379,13 +444,13 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
 
             hidden_states = []
 
-            assert len(self.model.text_hidden_fcs) == 1
-            hidden_states.append(self.model.text_hidden_fcs[0](output_hidden_states))
+            assert len(self.text_hidden_fcs) == 1
+            hidden_states.append(self.text_hidden_fcs[0](output_hidden_states))
 
             last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
             pred_embeddings = last_hidden_state[seg_token_mask]
 
-            seg_token_counts = seg_token_mask.int().sum(-1)  # [bs, ]
+            seg_token_counts = seg_token_mask.int().sum(-1)
             seg_token_offset = seg_token_counts.cumsum(-1)
             seg_token_offset = torch.cat(
                 [torch.zeros(1).long().cuda(), seg_token_offset], dim=0
@@ -405,7 +470,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 (
                     sparse_embeddings,
                     dense_embeddings,
-                ) = self.model.visual_model.prompt_encoder(
+                ) = self.visual_model.prompt_encoder(
                     points=None,
                     boxes=None,
                     masks=None,
@@ -413,14 +478,14 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 )
 
                 sparse_embeddings = sparse_embeddings.to(pred_embeddings[i].dtype)
-                low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
+                low_res_masks, iou_predictions = self.visual_model.mask_decoder(
                     image_embeddings=image_embeddings[i].unsqueeze(0),
-                    image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
+                    image_pe=self.visual_model.prompt_encoder.get_dense_pe(),
                     sparse_prompt_embeddings=sparse_embeddings,
                     dense_prompt_embeddings=dense_embeddings,
                     multimask_output=multimask_output,
                 )
-                pred_mask = self.model.visual_model.postprocess_masks(
+                pred_mask = self.visual_model.postprocess_masks(
                     low_res_masks,
                     input_size=resize_list[i],
                     original_size=original_size_list[i],

@@ -321,6 +321,15 @@ def preprocess(
         ds_name: str = None,
         num_image: int = 1
 ) -> Dict:
+    # print("=== Tokenizer Info ===")
+    # print(tokenizer)
+    # print("pad_token:", tokenizer.pad_token)
+    # print("pad_token_id:", tokenizer.pad_token_id)
+    # print("eos_token:", tokenizer.eos_token)
+    # print("eos_token_id:", tokenizer.eos_token_id)
+    # print("unk_token:", tokenizer.unk_token)
+    # print("unk_token_id:", tokenizer.unk_token_id)
+    # print("======================")
     conv = get_conv_template(template_name)
     roles = {'human': conv.roles[0], 'gpt': conv.roles[1]}
 
