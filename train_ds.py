@@ -175,16 +175,16 @@ def main(args):
     )
 
     # 新增打印代码
-    # print("LISAForCausalLM instance attributes:")
+    # print("instance attributes:")
     # for attr_name in dir(model):
     #     if not attr_name.startswith('__') and not callable(getattr(model, attr_name)):
     #         print(f"  - {attr_name}")
     #
-    # print("\nLISAForCausalLM submodules:")
+    # print("\nsubmodules:")
     # for name, module in model.named_modules():
     #     print(f"  {name}: {type(module).__name__}")
     #
-    # print("\nLISAForCausalLM __dict__ keys:")
+    # print("\n__dict__ keys:")
     # for key in model.__dict__.keys():
     #     print(f"  - {key}")
     # exit(0)

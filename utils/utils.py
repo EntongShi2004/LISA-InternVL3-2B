@@ -6,10 +6,10 @@ import torch.distributed as dist
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = -200
-DEFAULT_IMAGE_TOKEN = "<IMG_CONTEXT>"
+DEFAULT_IMAGE_TOKEN = "<image>"
 DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"
-DEFAULT_IM_START_TOKEN = "<img>"
-DEFAULT_IM_END_TOKEN = "</img>"
+DEFAULT_IM_START_TOKEN = ""
+DEFAULT_IM_END_TOKEN = ""
 
 SHORT_QUESTION_LIST = [
     DEFAULT_IMAGE_TOKEN + "\n" + "Can you segment the {class_name} in this image?",

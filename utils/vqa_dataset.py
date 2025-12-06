@@ -9,20 +9,19 @@ from transformers import CLIPImageProcessor
 
 from model.internvl import conversation as conversation_lib
 from model.segment_anything.utils.transforms import ResizeLongestSide
-
-from model.internvl.train.dataset import IMG_CONTEXT_TOKEN
+from .utils import DEFAULT_IMAGE_TOKEN
 
 
 def preprocess_multimodal(source, mm_use_im_start_end):
     for sentence in source:
-        if IMG_CONTEXT_TOKEN in sentence["value"]:
+        if DEFAULT_IMAGE_TOKEN in sentence["value"]:
             sentence["value"] = (
-                sentence["value"].replace(IMG_CONTEXT_TOKEN, "").strip()
+                sentence["value"].replace(DEFAULT_IMAGE_TOKEN, "").strip()
             )
-            sentence["value"] = IMG_CONTEXT_TOKEN + "\n" + sentence["value"]
+            sentence["value"] = DEFAULT_IMAGE_TOKEN + "\n" + sentence["value"]
             sentence["value"] = sentence["value"].strip()
             sentence["value"] = sentence["value"].replace(
-                IMG_CONTEXT_TOKEN, "<Image>" + IMG_CONTEXT_TOKEN + "</Image>"
+                DEFAULT_IMAGE_TOKEN, "<Image>" + DEFAULT_IMAGE_TOKEN + "</Image>"
             )
     return source
 

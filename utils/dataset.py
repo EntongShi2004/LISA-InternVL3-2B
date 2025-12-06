@@ -124,19 +124,19 @@ def collate_fn(
     }
 
     # 打印输出内容（按格式）
-    # print("="*50 + " Collate Fn Output " + "="*50)
-    # for key, value in result.items():
-    #     if isinstance(value, torch.Tensor):
-    #         print(f"{key}: shape={value.shape}, dtype={value.dtype}, device={value.device if hasattr(value, 'device') else 'cpu'}, first_5_elements={value.flatten()[:5] if value.numel() > 0 else 'empty'}")
-    #     elif isinstance(value, list):
-    #         if len(value) > 0 and isinstance(value[0], torch.Tensor):
-    #             print(f"{key}: length={len(value)}, first_element_shape={value[0].shape if value else 'empty'}, first_element_dtype={value[0].dtype if value else 'empty'}")
-    #         else:
-    #             print(f"{key}: length={len(value)}, first_3_elements={value[:3] if len(value) > 0 else 'empty'}, type={type(value[0]) if len(value) > 0 else 'None'}")
-    #     else:
-    #         print(f"{key}: type={type(value)}, value={value}")
-    # print("="*100)
-    # exit(0)
+    print("="*50 + " Collate Fn Output " + "="*50)
+    for key, value in result.items():
+        if isinstance(value, torch.Tensor):
+            print(f"{key}: shape={value.shape}, dtype={value.dtype}, device={value.device if hasattr(value, 'device') else 'cpu'}, first_5_elements={value.flatten()[:5] if value.numel() > 0 else 'empty'}")
+        elif isinstance(value, list):
+            if len(value) > 0 and isinstance(value[0], torch.Tensor):
+                print(f"{key}: length={len(value)}, first_element_shape={value[0].shape if value else 'empty'}, first_element_dtype={value[0].dtype if value else 'empty'}")
+            else:
+                print(f"{key}: length={len(value)}, first_3_elements={value[:3] if len(value) > 0 else 'empty'}, type={type(value[0]) if len(value) > 0 else 'None'}")
+        else:
+            print(f"{key}: type={type(value)}, value={value}")
+    print("="*100)
+    exit(0)
     return result
 
 
